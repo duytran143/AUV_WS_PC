@@ -1,33 +1,41 @@
-import cv2
-import socket
-import numpy as np
+import socket, threading, cv2, numpy as np
 
-# Cấu hình socket
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-host_ip = '192.168.2.1'  # Địa chỉ IP của Raspberry Pi
-port = 5001
-socket_address = (host_ip, port)
+# CONFIG
+PORT      = 5001
+MAX_DGRAM = 65535
 
-# Liên kết socket
-client_socket.bind(socket_address)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('0.0.0.0', PORT))
 
-frame_data = b""  # Dữ liệu video đã nhận
+latest = None
+lock = threading.Lock()
 
-while True:
-    data, addr = client_socket.recvfrom(65536)  # Nhận gói UDP
-    frame_data += data  # Nối các phần dữ liệu lại với nhau
-
-    # Kiểm tra xem dữ liệu có đủ để giải mã không
-    try:
-        frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+def receiver():
+    global latest
+    while True:
+        packet, _ = sock.recvfrom(MAX_DGRAM)
+        frame_len = int.from_bytes(packet[:4], 'big')
+        data = packet[4:]
+        while len(data) < frame_len:
+            more, _ = sock.recvfrom(MAX_DGRAM)
+            data += more
+        frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8),
+                             cv2.IMREAD_COLOR)
         if frame is not None:
-            cv2.imshow('Received Video', frame)
-        frame_data = b""  # Đặt lại buffer sau khi đã giải mã thành công
-    except Exception as e:
-        pass  # Bỏ qua nếu chưa đủ dữ liệu để giải mã
+            with lock:
+                latest = frame
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+# start receiver thread
+threading.Thread(target=receiver, daemon=True).start()
 
-client_socket.close()
-cv2.destroyAllWindows()
+try:
+    while True:
+        with lock:
+            frame = latest.copy() if latest is not None else None
+        if frame is not None:
+            cv2.imshow('fast UDP w/ overlay v2', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+finally:
+    sock.close()
+    cv2.destroyAllWindows()
